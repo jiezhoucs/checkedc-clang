@@ -4079,9 +4079,17 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
         // If the argument doesn't match, perform a bitcast to coerce it.  This
         // can happen due to trivial type mismatches.
-        if (FirstIRArg < IRFuncTy->getNumParams() &&
-            V->getType() != IRFuncTy->getParamType(FirstIRArg))
-          V = Builder.CreateBitCast(V, IRFuncTy->getParamType(FirstIRArg));
+        if (FirstIRArg < IRFuncTy->getNumParams()) {
+          llvm::Type *ParamTy = IRFuncTy->getParamType(FirstIRArg);
+          if (V->getType() != ParamTy) {
+            if (V->getType()->isMMSafePointerTy() && ParamTy) {
+              // Checked C: Casting an mmsafe pointer to a raw C pointer and
+              // pass the result to a function call.
+              V = Builder.CreateExtractValue(V, 0);
+            }
+            V = Builder.CreateBitCast(V, ParamTy);
+          }
+        }
 
         IRCallArgs[FirstIRArg] = V;
         break;

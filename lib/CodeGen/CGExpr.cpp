@@ -1728,6 +1728,7 @@ EmitMMArrayPtrForStrConst(llvm::Value *StrGEP, CGBuilderTy &Builder) {
 
   // Create an MMArrayPtr constant.
   StructType *ST = StructType::get(StrGEP->getType(), Int64Ty);
+  ST->isMMArrayPtr = true;
   Value *KeyOffset = Builder.CreateShl(llvm::ConstantInt::get(Int64Ty, 2),
                                           32, "KeyOffset");
   // The cast in the constructor should be safe because StrGEP should be an
