@@ -2475,6 +2475,13 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
 
         assert(0 && "Casting improper type to MMSafe pointer.");
       }
+    } else if (SrcTy->isMMSafePointerTy() && DstTy->isPointerTy()) {
+      // Checked C: Cast an mmsafe pointer to a raw C pointer.
+      // We did not allow this before, but actually the original Checked C
+      // allows casting a checked pointer to a raw pointer; it is the other
+      // way around is restricted in that the compiler must be able to prove
+      // that the cast is safe.
+      Src = Builder.CreateExtractValue(Src, 0);
     }
     return Builder.CreateBitCast(Src, DstTy);
   }

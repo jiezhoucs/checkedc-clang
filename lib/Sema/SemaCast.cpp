@@ -2726,7 +2726,12 @@ void CastOperation::CheckCStyleCast(bool IsCheckedScope) {
     SrcExpr = ExprError();
     return;
   }
-  // Disallow cast an MMSafe pointer to a non-MMSafe pointer.
+#if 0
+  // Disallow casting an MMSafe pointer to a non-MMSafe pointer.
+  //
+  // Updated on 8/3/2021. We did not allow this before. But actually
+  // the original Checked C allows casting a checked pointer to a raw C pointer.
+  // There is indeed no strong reason to prohibit this.
   if (SrcType->isCheckedPointerMMSafeType() &&
       !DestType->isCheckedPointerMMSafeType()) {
     Self.Diag(SrcExpr.get()->getExprLoc(),
@@ -2734,6 +2739,7 @@ void CastOperation::CheckCStyleCast(bool IsCheckedScope) {
     SrcExpr = ExprError();
     return;
   }
+#endif
 
   DiagnoseCastOfObjCSEL(Self, SrcExpr, DestType);
   DiagnoseCallingConvCast(Self, SrcExpr, DestType, OpRange);
