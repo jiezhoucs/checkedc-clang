@@ -1075,6 +1075,8 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
     RValue Result = EmitReferenceBindingToExpr(RV);
     Builder.CreateStore(Result.getScalarVal(), ReturnValue);
   } else {
+    using GEPOperator = llvm::GEPOperator;
+    using GlobalVariable = llvm::GlobalVariable;
     switch (getEvaluationKind(RV->getType())) {
     case TEK_Scalar: {
       llvm::Value *ConcreteRV = EmitScalarExpr(RV);
@@ -1096,6 +1098,17 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
                                     CharUnits::fromQuantity(0),
                                     ReturnValue.getName() + "_innerPtr"));
       } else {
+        if (GEPOperator *GEP = dyn_cast<GEPOperator>(ConcreteRV)) {
+          GlobalVariable *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
+          if (GV && GV->isConstant() &&
+              ReturnValue.getElementType()->isMMArrayPointerTy()) {
+            assert(GEP->getResultElementType()->isIntegerTy(8) &&
+                   "Unknown global variable type");
+            // Checked C:  This should be directly retuning a string constant
+            // for an MMArrayPtr return type.
+            ConcreteRV = EmitMMArrayPtrForStrConst(ConcreteRV);
+          }
+        }
         Builder.CreateStore(ConcreteRV, ReturnValue);
       }
       break;

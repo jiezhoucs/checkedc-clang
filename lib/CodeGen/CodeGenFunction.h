@@ -2684,6 +2684,8 @@ public:
   /// Converts Location to a DebugLoc, if debug information is enabled.
   llvm::DebugLoc SourceLocToDebugLoc(SourceLocation Location);
 
+  /// Checked C: Emit an MMArrayPtr that points to a string constant.
+  llvm::Value *EmitMMArrayPtrForStrConst(llvm::Value *Str);
 
   //===--------------------------------------------------------------------===//
   //                            Declaration Emission

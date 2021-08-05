@@ -1719,8 +1719,8 @@ llvm::Value *CodeGenFunction::EmitFromMemory(llvm::Value *Value, QualType Ty) {
 // Return:
 //   A ConstantStruct representing an MMArrayPtr with @StrGEP as the first field.
 //
-static llvm::Value *
-EmitMMArrayPtrForStrConst(llvm::Value *StrGEP, CGBuilderTy &Builder) {
+llvm::Value *CodeGenFunction::
+EmitMMArrayPtrForStrConst(llvm::Value *StrGEP) {
   using Constant = llvm::Constant;
   using StructType = llvm::StructType;
   using Value = llvm::Value;
@@ -1797,7 +1797,7 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, Address Addr,
         // TODO: The type checker should forbid assigning a string constant
         // to an MMPtr, while it does not enforce it now.
         GV->setCheckableQualified(true);
-        Value = EmitMMArrayPtrForStrConst(Value, Builder);
+        Value = EmitMMArrayPtrForStrConst(Value);
       }
     }
   }
