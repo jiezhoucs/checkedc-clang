@@ -35,6 +35,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/CheckedCAddLockToCheckable.h"
 #include "llvm/IR/CheckedCHarmonizeType.h"
+#include "llvm/IR/CheckedCSecureStack.h"
 #include "llvm/LTO/LTOBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/SubtargetFeature.h"
@@ -674,6 +675,10 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
   if (CodeGenOpts.CheckedCHarmonizeType) {
     FPM.add(createCheckedCHarmonizeTypePass());
   }
+
+  // Checked C
+  // Add temporal memory safety for address-taken local variables.
+  FPM.add(createCheckedCSecureStackPass());
 
   // Set up the per-function pass manager.
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));

@@ -7991,6 +7991,47 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
   }
 }
 
+//
+// Checked C
+// This is a helper function that checks if an Expr is a pointer arithmetic
+// expression on a local or global constant array.
+//
+// Question: Should we support dynamic local arrays?
+//
+// FIXME? Although the current implementation works for the programs we have
+// seen, it looks suspicious.
+//
+static bool isPointerArithOnArray(Expr *E) {
+  E = E->IgnoreParenCasts();
+  const Type *T = E->getType().getTypePtr();
+
+  if (isa<DeclRefExpr>(E)) {
+    // Should be the case of just a local array, which is equal to the
+    // name of the array plus offset 0.
+    return T->getTypeClass() == Type::ConstantArray;
+  } else if (isa<BinaryOperator>(E)) {
+    while (true) {
+      // An binary expression can be arbitrarily long, e.g., a + b + c + ....
+      Expr *LHS = cast<BinaryOperator>(E)->getLHS()->IgnoreParenCasts();
+      Expr *RHS = cast<BinaryOperator>(E)->getRHS()->IgnoreParenCasts();
+      if(LHS->getType()->getTypeClass() == Type::ConstantArray ||
+         RHS->getType()->getTypeClass() == Type::ConstantArray) {
+        return true;
+      }
+
+      if (isa<BinaryOperator>(LHS)) {
+        E = LHS;
+      } else if (isa<BinaryOperator>(RHS)) {
+        E = RHS;
+      } else {
+        return false;
+      }
+    }
+  }
+
+  return false;
+}
+
 // checkPointerTypesForAssignment - This is a very tricky routine (despite
 // being closely modeled after the C99 spec:-). The odd characteristic of this
 // routine is it effectively iqnores the qualifiers on the top level pointee.
@@ -8086,8 +8127,10 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
   // Checked C
   // Check if this is assigning an unchecked pointer to an MMSafe pointer.
   // We disallow assigning a raw C pointer to an MMSafe pointer unless
-  // this pointer is constructed by getting the address of a memory object
-  // pointed by an MMSafe pointer.
+  // the raw pointer is
+  //    1. constructed from getting the address of a memory object pointed
+  //    by an MMSafe pointer.
+  //    2. an address of an address-taken stack or global object.
   //
   // Another implementation choice is to do the check earlier in
   // Sema::CheckSingleAssignmentConstraints(). In that case we do not need
@@ -8096,10 +8139,8 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
   if (rhkind == CheckedPointerKind::Unchecked &&
       (lhkind == CheckedPointerKind::MMPtr ||
        lhkind == CheckedPointerKind::MMArray)) {
-
-    // Check if the RHS is a ternary expression (c? a : b) and if any
-    // any of its results returns an mmsafe pointer.
     Expr *RHSExpr = RHS.get();
+
     if (RHSExpr->isAddressOf()) {
       // Check if the RHS is an addr-of expression and if it returns
       // an mmsafe pointer.
@@ -8122,6 +8163,12 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
         } else {
           return Sema::Incompatible;
         }
+    } else {
+      if (isPointerArithOnArray(RHSExpr) &&
+          lhkind == CheckedPointerKind::MMArray) {
+        // Check if this is an expression of an arithmetic expr on an array.
+        return Sema::Compatible;
+      }
     }
 
 #if 0

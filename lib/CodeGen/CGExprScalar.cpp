@@ -428,6 +428,9 @@ public:
   // Checked C: Emit an mmsafe ptr to a _checkable stack/global object.
   Value *EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf=false);
 
+  // Checked C: Emit an mmsafe ptr to an address-taken local variable.
+  Value *EmitMMSafePtrToAddressTakenVar(Value *Val, bool isAddrOf=false);
+
   //===--------------------------------------------------------------------===//
   //                            Visitor Methods
   //===--------------------------------------------------------------------===//
@@ -1959,6 +1962,59 @@ Value *ScalarExprEmitter::EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf)
   return Builder.CreateInsertValue(insertPtr, KeyOffset, 1);
 }
 
+//
+// Checked C
+// Emit an MMSafe pointer to an address-taken local or global object.
+//
+// TODO: Currently we have only support for arithmetic expression on
+// a local or global array. We need implement generating an mmsafe pointer
+// from an address-of expression.
+//
+Value *
+ScalarExprEmitter::EmitMMSafePtrToAddressTakenVar(Value *Val, bool isAddrOf) {
+  using StructType = llvm::StructType;
+  using PointerType = llvm::PointerType;
+  using GEPOperator = llvm::GEPOperator;
+  unsigned AS = Val->getType()->getPointerAddressSpace();
+  llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
+
+  if (!isAddrOf) {
+    // The Val is an arithmetic expression of an array.
+    GEPOperator *GEP = dyn_cast<GEPOperator>(Val);
+    assert(GEP && "Not a GEP");
+    Value *GEPPtr = GEP->getPointerOperand();
+    if (isa<GEPOperator>(GEPPtr)) {
+      // Do this need to be in a loop?
+      GEPPtr = cast<GEPOperator>(GEPPtr)->getPointerOperand();
+    }
+
+    Value *Index;    // The numberic value of the arithmetic expression.
+    switch(GEP->getNumIndices()) {
+      case 1:
+        Index = GEP->getOperand(1);
+        break;
+      case 2:
+        // Does this case ever get triggered?
+        Index = GEP->getOperand(2);
+        break;
+      default:
+        assert(0 && "Unknown GEP Indices");
+        break;
+    }
+
+    // The initial offset is the offset (bytes) of the arith-expr.
+    // The key is now a placeholder. It will be set by the CheckedCSecureStackPass.
+    Value *KeyOffset = GetOffsetOfArithExpr(CGF, GEP, Index);
+    // Create an MMArrayPtr.
+    StructType *MMArrayPtrTy =
+      PointerType::getMMArrayPtr(GEP->getResultElementType(), llvmContext, AS);
+    Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMArrayPtrTy), Val, 0);
+    return Builder.CreateInsertValue(Val, KeyOffset, 1);
+  }
+
+  assert(0 && "Unhandled case(s)");
+}
+
 /// Emit a sanitization check for the given "binary" operation (which
 /// might actually be a unary increment which has been lowered to a binary
 /// operation). The check passes if all values in \p Checks (which are \c i1),
@@ -2473,7 +2529,10 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
           return EmitMMSafePtrToCheckableObj(Src);
         }
 
-        assert(0 && "Casting improper type to MMSafe pointer.");
+        // Should be from assigning the result of an arith-expr on an
+        // address-taken variable to a checked pointer.
+        assert(isa<GetElementPtrInst>(Src));
+        return EmitMMSafePtrToAddressTakenVar(Src);
       }
     } else if (SrcTy->isMMSafePointerTy() && DstTy->isPointerTy()) {
       // Checked C: Cast an mmsafe pointer to a raw C pointer.
