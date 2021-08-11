@@ -7942,11 +7942,17 @@ ExprResult Sema::ActOnConditionalOp(SourceLocation QuestionLoc,
 // Checked C
 // This is a helper function for CheckAssignmentConstraints() and
 // checkPointerTypesForAssignment(). It parses an address-of expression
-// to see if it returns the address of something pointed by an mmsafe pointer.
+// to see if it should return an mmsafe pointer. There are two conditions
+// it should return an mmsafe pointer,
+//   1. the addr-of expr computes the address of an object pointed by an
+//     mmsafe pointer, and the LHS of the assignment is an mmsafe pointer.
+//   2. the addr-of expr computes the address of a local or global variable
+//     and the LHS of the assignment is an mmsafe pointer.
 //
 // @arg UOExpr - An address-of expression.
+// @arg isLHSUnchecked - If the LHS of the assignment is an unchecked pointer.
 //
-static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
+static bool addrOfExprRetMMSafePtr(Expr *UOExpr, bool isLHSUnchecked=false) {
   assert(UOExpr->isAddressOf() && "Not an Address-Of Expression ");
 
   Expr *E = cast<UnaryOperator>(UOExpr)->getSubExpr();
@@ -7976,8 +7982,10 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
         E = cast<UnaryOperator>(E)->getSubExpr();
         break;
       case Expr::DeclRefExprClass:
-        // Reached the top (leftmost) of the Expr.
-        return true;
+        // Reached the top (leftmost) of the Expr. The UOPexr should be directly
+        // getting the address of a variable. If the LHS of the assignment is an
+        // unchecked pointer, then the RHS should not return an mmsafe pointer.
+        return !isLHSUnchecked;
       default:
         assert(0 && "Unknown Expr");
         break;
@@ -8458,7 +8466,7 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
     if (lhkind == CheckedPointerKind::Unchecked &&
         rhkind == CheckedPointerKind::Unchecked) {
       Expr *RHSExpr = RHS.get();
-      if (RHSExpr->isAddressOf() && addrOfExprRetMMSafePtr(RHSExpr)) {
+      if (RHSExpr->isAddressOf() && addrOfExprRetMMSafePtr(RHSExpr, true)) {
         // Check if the RHS is an addr-of expression that returns
         // an mmsafe pointer.
           return Sema::Incompatible;
@@ -8467,8 +8475,8 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
         // If the RHS is a ternary expression (c ? a : b), then neither of
         // the results is allowed to return an mmsafe ptr.
         Expr *TrueExpr = CO->getTrueExpr(), *FalseExpr = CO->getFalseExpr();
-        if ((TrueExpr->isAddressOf() && addrOfExprRetMMSafePtr(TrueExpr)) ||
-            (FalseExpr->isAddressOf() && addrOfExprRetMMSafePtr(FalseExpr))) {
+        if ((TrueExpr->isAddressOf() && addrOfExprRetMMSafePtr(TrueExpr, true)) ||
+            (FalseExpr->isAddressOf() && addrOfExprRetMMSafePtr(FalseExpr, true))) {
             return Sema::Incompatible;
         }
       }
