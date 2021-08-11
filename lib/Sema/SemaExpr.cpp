@@ -7953,10 +7953,7 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
   unsigned level = 0;   // Iteration level.
   while (true) {
     // Strip off casts and parentheses.
-    while (isa<CastExpr>(E) || isa<ParenExpr>(E)) {
-      E = isa<CastExpr>(E) ? cast<CastExpr>(E)->getSubExpr() :
-        cast<ParenExpr>(E)->getSubExpr();
-    }
+    E = E->IgnoreParenCasts();
 
     QualType EType = E->getType();
     if (level != 0 && EType->isPointerType()) {
@@ -7980,9 +7977,7 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
         break;
       case Expr::DeclRefExprClass:
         // Reached the top (leftmost) of the Expr.
-        // Getting the address of a _checkable stack/global object should
-        // return an mmsafe pointer.
-        return EType.isCheckableQualified() ? true : false;
+        return true;
       default:
         assert(0 && "Unknown Expr");
         break;
@@ -7995,8 +7990,6 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
 // Checked C
 // This is a helper function that checks if an Expr is a pointer arithmetic
 // expression on a local or global constant array.
-//
-// Question: Should we support dynamic local arrays?
 //
 // FIXME? Although the current implementation works for the programs we have
 // seen, it looks suspicious.
@@ -8447,9 +8440,6 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
   // 1. Disallow assigning mmsafe pointers generated from an '&' expression
   // to a raw pointer.
   //
-  // FIXME? Should we allow or disallow 2.?
-  // 2. Disallow assigning the address of an _checkable object to a raw C pointer.
-  //
   // FIXME: Currently the RHSType of the result of an addres-of expression
   // is always a raw pointer. For example, The type of "&p->i" is "int *" if
   // i is an integer, regardless of the pointer type of p. This would give
@@ -8467,11 +8457,6 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
 
     if (lhkind == CheckedPointerKind::Unchecked &&
         rhkind == CheckedPointerKind::Unchecked) {
-      if (RHSType->getPointeeType().isCheckableQualified()) {
-        // Again, should we allow or disallow this?
-        return Sema::Incompatible;
-      }
-
       Expr *RHSExpr = RHS.get();
       if (RHSExpr->isAddressOf() && addrOfExprRetMMSafePtr(RHSExpr)) {
         // Check if the RHS is an addr-of expression that returns

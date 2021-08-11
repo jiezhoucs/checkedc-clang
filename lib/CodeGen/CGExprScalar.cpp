@@ -429,7 +429,7 @@ public:
   Value *EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf=false);
 
   // Checked C: Emit an mmsafe ptr to an address-taken local variable.
-  Value *EmitMMSafePtrToAddressTakenVar(Value *Val, bool isAddrOf=false);
+  Value *EmitMMSafePtrToAddressTakenVar(Value *Val);
 
   //===--------------------------------------------------------------------===//
   //                            Visitor Methods
@@ -1965,54 +1965,93 @@ Value *ScalarExprEmitter::EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf)
 //
 // Checked C
 // Emit an MMSafe pointer to an address-taken local or global object.
+// There are two cases. The first is an arithmetic expression of an array
+// (including using the name of the array, which is equivalent to "+ 0").
+// The second is an address-of expression of a variable.
 //
-// TODO: Currently we have only support for arithmetic expression on
-// a local or global array. We need implement generating an mmsafe pointer
-// from an address-of expression.
+// TODO: Add support for global variables.
 //
 Value *
-ScalarExprEmitter::EmitMMSafePtrToAddressTakenVar(Value *Val, bool isAddrOf) {
+ScalarExprEmitter::EmitMMSafePtrToAddressTakenVar(Value *Val) {
   using StructType = llvm::StructType;
   using PointerType = llvm::PointerType;
   using GEPOperator = llvm::GEPOperator;
+  using UndefValue = llvm::UndefValue;
+  using AllocaInst = llvm::AllocaInst;
+  using ArrayType = llvm::ArrayType;
+  const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
   unsigned AS = Val->getType()->getPointerAddressSpace();
   llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
 
-  if (!isAddrOf) {
-    // The Val is an arithmetic expression of an array.
-    GEPOperator *GEP = dyn_cast<GEPOperator>(Val);
-    assert(GEP && "Not a GEP");
-    Value *GEPPtr = GEP->getPointerOperand();
-    if (isa<GEPOperator>(GEPPtr)) {
-      // Do this need to be in a loop?
-      GEPPtr = cast<GEPOperator>(GEPPtr)->getPointerOperand();
-    }
-
-    Value *Index;    // The numberic value of the arithmetic expression.
-    switch(GEP->getNumIndices()) {
-      case 1:
-        Index = GEP->getOperand(1);
-        break;
-      case 2:
-        // Does this case ever get triggered?
-        Index = GEP->getOperand(2);
-        break;
-      default:
-        assert(0 && "Unknown GEP Indices");
-        break;
-    }
-
-    // The initial offset is the offset (bytes) of the arith-expr.
-    // The key is now a placeholder. It will be set by the CheckedCSecureStackPass.
-    Value *KeyOffset = GetOffsetOfArithExpr(CGF, GEP, Index);
-    // Create an MMArrayPtr.
-    StructType *MMArrayPtrTy =
-      PointerType::getMMArrayPtr(GEP->getResultElementType(), llvmContext, AS);
-    Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMArrayPtrTy), Val, 0);
+  if (AllocaInst *AI = dyn_cast<AllocaInst>(Val)) {
+    // The Val is from directly getting the address of a var, e.g., "&num".
+    Value *KeyOffset = Builder.getInt64(0);
+    StructType *MMPtrTy =
+      PointerType::getMMPtr(AI->getAllocatedType(), llvmContext, AS);
+    Val = Builder.CreateInsertValue(UndefValue::get(MMPtrTy), Val, 0);
     return Builder.CreateInsertValue(Val, KeyOffset, 1);
   }
 
-  assert(0 && "Unhandled case(s)");
+  // Handle an address-taken or pointer-arithmetic expression.
+
+  // Find out if Val is from a arith expr or an addr-of expr.
+  // Until now all the arith GEP only have one index except for the one
+  // whose pointer operand is an array variable, and all addr-of expr GEP
+  // has 2 indices before any optimization.
+  // Let's just do the implementation based on these assumptions.
+  GEPOperator *GEP = cast<GEPOperator>(Val);
+  Value *Offset = Builder.getInt64(0);
+  bool isPtrArithExpr = true;
+  StructType *MMSafePtrTy;
+  llvm::Type *PointeeTy = GEP->getResultElementType();
+  // Verify the assumptions stated above.
+  if (GEP->getNumIndices() == 1) {
+    while ((GEP = dyn_cast<GEPOperator>(GEP->getPointerOperand()))) {
+      assert((GEP->getNumIndices() == 1 || (GEP->getNumIndices() == 2 &&
+              isa<ArrayType>(GEP->getSourceElementType())))
+             && "Unknown GEP indices");
+    }
+    MMSafePtrTy = PointerType::getMMArrayPtr(PointeeTy, llvmContext, AS);
+  } else if (GEP->getNumIndices() == 2) {
+    while ((GEP = dyn_cast<GEPOperator>(GEP->getPointerOperand()))) {
+      assert(GEP->getNumIndices() == 2 && "Unknown GEP indices");
+    }
+    isPtrArithExpr = false;
+    MMSafePtrTy = PointerType::getMMPtr(PointeeTy, llvmContext, AS);
+  } else {
+    assert(0 && "Unknow GEP Indices");
+  }
+
+  GEP = cast<GEPOperator>(Val);
+  if (isPtrArithExpr) {
+    while (GEP) {
+      Offset = Builder.CreateAdd(Offset,
+          GetOffsetOfArithExpr(CGF, GEP, GEP->getOperand(1)));
+      GEP = dyn_cast<GEPOperator>(GEP->getPointerOperand());
+    }
+  } else {
+    while (GEP) {
+      Value *Index = GEP->getOperand(2);
+      // If the first index is not 0, add sizeof(struct) * firstIdx to Offset.
+      assert(cast<ConstantInt>(GEP->getOperand(1))->isZero() &&
+          "The first index of the GEP is not 0");
+      llvm::Type *GEPElemTy = GEP->getSourceElementType();
+      if (StructType *ST = dyn_cast<StructType>(GEPElemTy)) {
+        Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index, DL));
+      } else if (ArrayType *AT = dyn_cast<ArrayType>(GEPElemTy)) {
+        Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index, DL));
+      } else {
+        assert(0 && "Unknown GEP Element Type");
+      }
+      GEP = dyn_cast<GEPOperator>(GEP->getPointerOperand());
+    }
+  }
+
+  // The initial offset for the mmsafe pointer is the offset (bytes) of the
+  // arith-expr or addr-of expr. The key is now only a placeholder. It will be
+  // set by the CheckedCSecureStackPass.
+  Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMSafePtrTy), Val, 0);
+  return Builder.CreateInsertValue(Val, Offset, 1);
 }
 
 /// Emit a sanitization check for the given "binary" operation (which
@@ -2529,10 +2568,13 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
           return EmitMMSafePtrToCheckableObj(Src);
         }
 
-        // Should be from assigning the result of an arith-expr on an
-        // address-taken variable to a checked pointer.
-        assert(isa<GetElementPtrInst>(Src));
-        return EmitMMSafePtrToAddressTakenVar(Src);
+        if (isa<GetElementPtrInst>(Src) || isa<llvm::AllocaInst>(Src)) {
+        // The RHS should be assigning
+        //   1. an arith-expr of an address-taken variable to an mmsafe ptr.
+        //   2. an addr-of expr on a fild of a struct variable to an mmsafe ptr.
+          return EmitMMSafePtrToAddressTakenVar(Src);
+        }
+        assert(0 && "Unknown Instruction");
       }
     } else if (SrcTy->isMMSafePointerTy() && DstTy->isPointerTy()) {
       // Checked C: Cast an mmsafe pointer to a raw C pointer.
