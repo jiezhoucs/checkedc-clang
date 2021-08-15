@@ -1106,7 +1106,8 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
                    "Unknown global variable type");
             // Checked C:  This should be directly retuning a string constant
             // for an MMArrayPtr return type.
-            ConcreteRV = EmitMMArrayPtrForStrConst(ConcreteRV);
+            GV->setCheckableQualified(true);
+            ConcreteRV = EmitMMArrayPtrForStrConst(GEP);
           }
         }
         Builder.CreateStore(ConcreteRV, ReturnValue);

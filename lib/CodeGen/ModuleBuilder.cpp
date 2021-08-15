@@ -163,39 +163,6 @@ namespace {
       for (DeclGroupRef::iterator I = DG.begin(), E = DG.end(); I != E; ++I)
         Builder->EmitTopLevelDecl(*I);
 
-#if 0
-      // Checked C: create the two key check functions if they do not exist.
-      // Because our key check optmization pass inserts key checks for
-      // function calls with mmsafe pointer arguments, when a module
-      // has such function calls but does not have dereferences to the types
-      // of mmsafe pointer arguments aforementioned, the compiler would not
-      // generate key check functions for such types of mmsafe pointers
-      // during CodeGenFunction::EmitDynamicKeyCheck(). Here the compiler
-      // ensures that it always generates the two key check functions for
-      // Checked C programs.  This may generate unneeded key check function(s),
-      // but it should be faster than first checking if there are dereferences
-      // to such mmsafe pointers before creating key check functions.
-      //
-      // FIXME: Putting this piece of code here is not ideal because it will
-      // be called many many times for a module and only one call is needed.
-      // We should find a better place to place this piece of code; or we can
-      // modify CodeGenFunction to create these function before calls with
-      // mmsafe pointers arguments during function generation, similar to
-      // what we did for inserting key checks.
-      if (Builder->getLangOpts().CheckedC) {
-        if (!Builder->hasMMPtrKeyCheckFn()) {
-          CodeGenFunction CGF(*Builder);
-          CGF.GetOrInsertKeyCheckFn();
-          Builder->setHasMMPtrKeyCheckFnTrue();
-        }
-        if (!Builder->hasMMArrayPtrKeyCheckFn()) {
-          CodeGenFunction CGF(*Builder);
-          CGF.GetOrInsertKeyCheckFn(false);
-          Builder->setHasMMArrayPtrKeyCheckFnTrue();
-        }
-      }
-#endif
-
       return true;
     }
 

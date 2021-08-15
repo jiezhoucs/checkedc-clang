@@ -1328,6 +1328,9 @@ public:
   bool hasMMArrayPtrKeyCheckFn() const {
     return MMArrayPtrKeyCheckFn;
   }
+
+  /// Add locks to global objects pointed by mmsafe pointers.
+  void addLockToAddrTakenGlobalObj();
 private:
   llvm::Constant *GetOrCreateLLVMFunction(
       StringRef MangledName, llvm::Type *Ty, GlobalDecl D, bool ForVTable,

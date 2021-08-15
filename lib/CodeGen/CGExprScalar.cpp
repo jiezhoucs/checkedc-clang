@@ -429,7 +429,9 @@ public:
   Value *EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf=false);
 
   // Checked C: Emit an mmsafe ptr to an address-taken local variable.
-  Value *EmitMMSafePtrToAddressTakenVar(Value *Val);
+  Value *EmitMMSafePtrToLocalAddrTakenVar(Value *Val);
+  // Checked C: Emit an mmsafe ptr to an address-taken global variable.
+  Value *EmitMMSafePtrToGlobalAddrTakenVar(Value *Val);
 
   //===--------------------------------------------------------------------===//
   //                            Visitor Methods
@@ -1969,26 +1971,22 @@ Value *ScalarExprEmitter::EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf)
 // (including using the name of the array, which is equivalent to "+ 0").
 // The second is an address-of expression of a variable.
 //
-// TODO: Add support for global variables.
-//
 Value *
-ScalarExprEmitter::EmitMMSafePtrToAddressTakenVar(Value *Val) {
+ScalarExprEmitter::EmitMMSafePtrToLocalAddrTakenVar(Value *Val) {
   using StructType = llvm::StructType;
   using PointerType = llvm::PointerType;
   using GEPOperator = llvm::GEPOperator;
-  using UndefValue = llvm::UndefValue;
-  using AllocaInst = llvm::AllocaInst;
   using ArrayType = llvm::ArrayType;
   const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
   unsigned AS = Val->getType()->getPointerAddressSpace();
   llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
 
-  if (AllocaInst *AI = dyn_cast<AllocaInst>(Val)) {
+  if (llvm::AllocaInst *AI = dyn_cast<llvm::AllocaInst>(Val)) {
     // The Val is from directly getting the address of a var, e.g., "&num".
     Value *KeyOffset = Builder.getInt64(0);
     StructType *MMPtrTy =
       PointerType::getMMPtr(AI->getAllocatedType(), llvmContext, AS);
-    Val = Builder.CreateInsertValue(UndefValue::get(MMPtrTy), Val, 0);
+    Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMPtrTy), Val, 0);
     return Builder.CreateInsertValue(Val, KeyOffset, 1);
   }
 
@@ -2052,6 +2050,76 @@ ScalarExprEmitter::EmitMMSafePtrToAddressTakenVar(Value *Val) {
   // set by the CheckedCSecureStackPass.
   Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMSafePtrTy), Val, 0);
   return Builder.CreateInsertValue(Val, Offset, 1);
+}
+
+//
+// Checked C
+// Emit an MMSafe pointer to an address-taken global variable.
+// There are two cases. Frist, address-of expressions. Second, pointer arithmetic
+// expressions. Directly assigning a string constant to an mm_array_ptr<char>
+// is handled separately.
+//
+Value *ScalarExprEmitter::EmitMMSafePtrToGlobalAddrTakenVar(Value *Val) {
+  using GlobalVariable = llvm::GlobalVariable;
+  using GEPOperator = llvm::GEPOperator;
+  const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
+  unsigned AS = Val->getType()->getPointerAddressSpace();
+  llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
+
+  StructType *MMSafePtrTy = nullptr;
+  Value *KeyOffset = Builder.getInt64(1ul << 32);
+  if (isa<GlobalVariable>(Val)) {
+    // Should be from directly getting the address of a global variable,
+    // e.g., p = &num; where num is a global int.
+    MMSafePtrTy = llvm::PointerType::getMMPtr(
+        cast<GlobalVariable>(Val)->getValueType(), llvmContext, AS);
+    cast<GlobalVariable>(Val)->setPointedByMMSafePtr();
+  } else {
+    GEPOperator *GEP = cast<GEPOperator>(Val);
+    llvm::Type *GEPElemTy = GEP->getSourceElementType();
+    if (isa<GlobalVariable>(GEP->getPointerOperand())) {
+      // Should be from getting the address of an inner object of a global var.
+      cast<GlobalVariable>(GEP->getPointerOperand())->setPointedByMMSafePtr();
+
+      // If the first index is not 0, add sizeof(struct) * firstIdx to Offset.
+      assert(cast<ConstantInt>(GEP->getOperand(1))->isZero() &&
+          "The first index of the GEP is not 0");
+      for (unsigned i = 2; i <= GEP->getNumIndices(); i++) {
+        Value *Index = GEP->getOperand(i);
+        if (StructType *ST = dyn_cast<StructType>(GEPElemTy)) {
+          KeyOffset = Builder.CreateAdd(KeyOffset,
+              GetStructElemOffset(ST, Index, DL));
+          GEPElemTy = ST->getTypeAtIndex(Index);
+        } else if (llvm::ArrayType *AT = dyn_cast<llvm::ArrayType>(GEPElemTy)) {
+          KeyOffset = Builder.CreateAdd(KeyOffset,
+              GetArrayElemOffset(AT, Index, DL));
+          GEPElemTy = AT->getElementType();
+        } else {
+          assert(0 && "Unknown GEP Srouce Element Type");
+        }
+      }
+    } else {
+      // Should be from an arithmetic expression of a global array.
+      while (true) {
+        KeyOffset = Builder.CreateAdd(KeyOffset,
+            GetOffsetOfArithExpr(CGF, GEP, GEP->getOperand(1)));
+        Value *GEPPtr = GEP->getPointerOperand();
+        if (GEPOperator *GEPO = dyn_cast<GEPOperator>(GEPPtr)) {
+          GEP = GEPO;
+        } else if (GlobalVariable *GV = dyn_cast<GlobalVariable>(GEPPtr)) {
+          GV->setPointedByMMSafePtr();
+          break;
+        } else {
+          assert(0 && "Unknown GEP");
+        }
+      }
+    }
+    MMSafePtrTy = llvm::PointerType::getMMArrayPtr(GEPElemTy, llvmContext, AS);
+  }
+
+  // Create an MMSafe pointer and return it.
+  Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMSafePtrTy), Val, 0);
+  return Builder.CreateInsertValue(Val, KeyOffset, 1);
 }
 
 /// Emit a sanitization check for the given "binary" operation (which
@@ -2565,16 +2633,37 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
         if (DstTy->isMMArrayPointerTy() && SrcQualTy->isPointerType() &&
             SrcQualTy->getPointeeType().isCheckableQualified()) {
           // Create an MMArrayPtr from an arith-expr on a _checkable object.
-          return EmitMMSafePtrToCheckableObj(Src);
+          Src = EmitMMSafePtrToCheckableObj(Src);
         }
 
-        if (isa<GetElementPtrInst>(Src) || isa<llvm::AllocaInst>(Src)) {
-        // The RHS should be assigning
-        //   1. an arith-expr of an address-taken variable to an mmsafe ptr.
-        //   2. an addr-of expr on a fild of a struct variable to an mmsafe ptr.
-          return EmitMMSafePtrToAddressTakenVar(Src);
+        // Should be getting the address of a local or global variable.
+        using GEPOperator = llvm::GEPOperator;
+        bool isLocalVar;
+        if (isa<GetElementPtrInst>(Src)) {
+          // The RHS should be one of the follow two cases:
+          //   1. an arith-expr of an address-taken variable
+          //   2. an addr-of expr on a fild of a struct variable
+          //
+          // Determine if this is from a local or global variable.
+          Value *GEPPtr = cast<GetElementPtrInst>(Src);
+          while (isa<GEPOperator>(GEPPtr)) {
+            GEPPtr = cast<GEPOperator>(GEPPtr)->getPointerOperand();
+          }
+          isLocalVar = !isa<llvm::GlobalVariable>(GEPPtr);
+        } else if (isa<llvm::AllocaInst>(Src)) {
+          // The RHS should be using the addr-of operator to directly get the
+          // address of a local variable.
+          isLocalVar = true;
+        } else if (isa<llvm::GlobalVariable>(Src) || isa<GEPOperator>(Src)) {
+          // The RHS should be directly getting the address of a global variable,
+          // "p = &len"; or "p = buf;" where buf is an array.
+          isLocalVar = false;
+        } else {
+          assert(0 && "Unknown Instruction");
         }
-        assert(0 && "Unknown Instruction");
+        Src = isLocalVar ? EmitMMSafePtrToLocalAddrTakenVar(Src) :
+                           EmitMMSafePtrToGlobalAddrTakenVar(Src);
+        return Builder.CreateMMSafePtrCast(Src, DstTy);
       }
     } else if (SrcTy->isMMSafePointerTy() && DstTy->isPointerTy()) {
       // Checked C: Cast an mmsafe pointer to a raw C pointer.

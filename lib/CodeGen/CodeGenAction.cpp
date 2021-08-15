@@ -225,6 +225,20 @@ namespace clang {
       return false; // success
     }
 
+    // Checked C
+    // Process Checked C related stuffs before running optimization passes.
+    //
+    // TODO/FIXME:
+    // 1. Move the CheckedCHarmonizeTypePass to CodeGenModule or CodeGenFunction
+    // and call its code from here.
+    // 2. Move the CheckedCSecureStackPass to CodeGenModule or CodeGenFunction
+    // and call its code from here.
+    // 3. Fix "_checkable" related code.
+    void HandleCheckedCForTemporalMemSafety() override {
+      // Add locks for global objects pointed by mmsafe pointers.
+      Gen->CGM().addLockToAddrTakenGlobalObj();
+    }
+
     void HandleTranslationUnit(ASTContext &C) override {
       {
         PrettyStackTraceString CrashInfo("Per-file LLVM IR generation");
@@ -235,6 +249,10 @@ namespace clang {
         }
 
         Gen->HandleTranslationUnit(C);
+
+        // Process Checked C related stuffs. This should be the earliest point
+        // after the initial complete IR code generation before optimizations.
+        HandleCheckedCForTemporalMemSafety();
 
         if (FrontendTimesIsEnabled) {
           LLVMIRGenerationRefCount -= 1;
