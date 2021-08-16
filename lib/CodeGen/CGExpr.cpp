@@ -1720,21 +1720,22 @@ llvm::Value *CodeGenFunction::EmitFromMemory(llvm::Value *Value, QualType Ty) {
 //   A ConstantStruct representing an MMArrayPtr with @StrGEP as the first field.
 //
 llvm::Value *CodeGenFunction::
-EmitMMArrayPtrForStrConst(llvm::Value *StrGEP) {
-  using Constant = llvm::Constant;
-  using StructType = llvm::StructType;
-  using Value = llvm::Value;
+EmitMMArrayPtrForStrConst(llvm::GEPOperator *StrGEP) {
+  llvm::ConstantExpr *CE = dyn_cast<llvm::ConstantExpr>(StrGEP);
+  assert((CE && CE->getOpcode() == llvm::Instruction::GetElementPtr) &&
+         "Not a GetElementPtrConstantExpr");
   llvm::Type *Int64Ty = Builder.getInt64Ty();
 
   // Create an MMArrayPtr constant.
-  StructType *ST = StructType::get(StrGEP->getType(), Int64Ty);
+  llvm::StructType *ST = llvm::StructType::get(StrGEP->getType(), Int64Ty);
   ST->isMMArrayPtr = true;
-  Value *KeyOffset = Builder.CreateShl(llvm::ConstantInt::get(Int64Ty, 2),
-                                          32, "KeyOffset");
+  llvm::Value *KeyOffset = Builder.CreateShl(llvm::ConstantInt::get(Int64Ty, 1),
+                                             32, "KeyOffset");
+  cast<llvm::GlobalVariable>(StrGEP->getPointerOperand())->setPointedByMMSafePtr();
   // The cast in the constructor should be safe because StrGEP should be an
   // llvm::GetElementPtrConstantExpr.
-  return llvm::ConstantStruct::get(ST, {cast<Constant>(StrGEP),
-                                        cast<Constant>(KeyOffset)});
+  return llvm::ConstantStruct::get(ST, {cast<llvm::Constant>(StrGEP),
+                                        cast<llvm::Constant>(KeyOffset)});
 }
 
 void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, Address Addr,
@@ -1786,8 +1787,8 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, Address Addr,
       if (GV && GV->isConstant() && GEP->getResultElementType()->isIntegerTy(8)
           && Addr.getElementType()->isMMArrayPointerTy()) {
         // Checked C: Directly assigning an string constant to an MMArrayPtr.
-        // Since string constants are stored as private globals, we treat them
-        // as _checkable global variables.
+        // String constants are stored as private globals, we treat them
+        // as address-taken global variables.
         //
         // Jie Zhou: The checks in this if statement might be redundant. If
         // the execution reaches to the outside if condition, it should be
@@ -1796,8 +1797,7 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, Address Addr,
         //
         // TODO: The type checker should forbid assigning a string constant
         // to an MMPtr, while it does not enforce it now.
-        GV->setCheckableQualified(true);
-        Value = EmitMMArrayPtrForStrConst(Value);
+        Value = EmitMMArrayPtrForStrConst(GEP);
       }
     }
   }

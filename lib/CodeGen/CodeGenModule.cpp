@@ -58,6 +58,8 @@
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MD5.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Constants.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -3661,7 +3663,6 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
       !llvm::GlobalVariable::isLinkOnceLinkage(Linkage) &&
       !llvm::GlobalVariable::isWeakLinkage(Linkage))
     Linkage = llvm::GlobalValue::InternalLinkage;
-
   GV->setLinkage(Linkage);
   if (D->hasAttr<DLLImportAttr>())
     GV->setDLLStorageClass(llvm::GlobalVariable::DLLImportStorageClass);
@@ -5508,4 +5509,82 @@ CodeGenModule::createOpenCLIntToSamplerConversion(const Expr *E,
   return CGF.Builder.CreateCall(CreateRuntimeFunction(FTy,
                                 "__translate_sampler_initializer"),
                                 {C});
+}
+
+//
+// Checked C
+// Method: addLockToAddrTakenGlobalObj()
+//
+// Add locks for address-taken global variables in a module.  Currently it adds
+// a lock for each address-taken global variable pointed by mmsafe pointer(s).
+//
+// A small optimization that can be done is to group global variables
+// that have the same attributes (linkage, constant, et.c) to one struct
+// and create one lock for the whole struct.
+//
+// Note that actually not EVERY address-taken global variable is processed.
+// We only care about address-taken variables that have at least one mmsafe
+// pointer point to them. If a global variable's address is taken and only
+// passed to a raw C pointer, this function ignores it.
+//
+void CodeGenModule::addLockToAddrTakenGlobalObj() {
+  using Constant = llvm::Constant;
+  using StructType = llvm::StructType;
+  using GlobalVariable = llvm::GlobalVariable;
+  CGBuilderTy Builder = CodeGenFunction(*this).Builder;
+  llvm::Module &M = getModule();
+  llvm::Type *Int64Ty = Builder.getInt64Ty();
+  std::vector<GlobalVariable *> addrTakenGVs;
+  Constant *Zero = Builder.getInt64(0), *Lock = Builder.getInt64(1);
+
+  // Collect all address-taken global variables.
+  for (GlobalVariable &GV : M.globals()) {
+    if (GV.isPointedByMMSafePtr() && !GV.isDeclaration()) {
+        addrTakenGVs.push_back(&GV);
+      if (GV.hasCommonLinkage()) {
+         // If a global variable is defined without explicit initialization,
+         // LLVM would set its linkage type to "common" and globals of
+         // common linkage must be initialized with zero initializer.
+         // Here we set it to ExternalLinkage because we would initialize
+         // it with a lock of value 1.
+         //
+         // Updated on 8/15: Do we really need this? From small test code I
+         // saw LLVM uses a zero initializer for global variabels even if
+         // they are not initialized in the source code.
+        GV.setLinkage(llvm::GlobalValue::ExternalLinkage);
+      }
+    }
+  }
+
+  for (GlobalVariable *GV : addrTakenGVs) {
+    unsigned AS = GV->getType()->getAddressSpace();
+    StructType *NewGVTy = nullptr;
+    Constant *NewGVInit = nullptr;
+    // Indices to GEP the new GV with the lock to get the original GV.
+    Constant *Indices[] = {Builder.getInt32(0), nullptr};
+    llvm::Type *GVTy = GV->getValueType();
+    Constant *GVInit = GV->getInitializer();
+    if (GVTy->isMMSafePointerTy()) {
+      // For mmsafe pointer global variables, we need ensure it is aligned
+      // by at least 16 bytes.
+      NewGVTy = StructType::get(Int64Ty, Int64Ty, GVTy);
+      NewGVInit = llvm::ConstantStruct::get(NewGVTy, {Zero, Lock, GVInit});
+      Indices[1] = Builder.getInt32(2);
+    } else {
+      NewGVTy = StructType::get(Int64Ty, GVTy);
+      NewGVInit = llvm::ConstantStruct::get(NewGVTy, {Lock, GVInit});
+      Indices[1] = Builder.getInt32(1);
+    }
+
+    // Create a struct that contains the lock and the original GV
+    GlobalVariable *GVWithLock =
+      new GlobalVariable(M, NewGVTy, GV->isConstant(), GV->getLinkage(),
+          NewGVInit, GV->getName() + "_addrTakenGlobals", nullptr,
+          GlobalVariable::NotThreadLocal, AS, GV->isExternallyInitialized());
+    if (GVTy->isMMSafePointerTy()) GVWithLock->setAlignment(16);
+    Constant *GEPToOriginGV =
+      llvm::ConstantExpr::getGetElementPtr(NewGVTy, GVWithLock, Indices);
+    GV->replaceAllUsesWith(GEPToOriginGV);
+    GV->eraseFromParent();
+  }
 }

@@ -7942,21 +7942,24 @@ ExprResult Sema::ActOnConditionalOp(SourceLocation QuestionLoc,
 // Checked C
 // This is a helper function for CheckAssignmentConstraints() and
 // checkPointerTypesForAssignment(). It parses an address-of expression
-// to see if it returns the address of something pointed by an mmsafe pointer.
+// to see if it should return an mmsafe pointer. There are two conditions
+// it should return an mmsafe pointer,
+//   1. the addr-of expr computes the address of an object pointed by an
+//     mmsafe pointer, and the LHS of the assignment is an mmsafe pointer.
+//   2. the addr-of expr computes the address of a local or global variable
+//     and the LHS of the assignment is an mmsafe pointer.
 //
 // @arg UOExpr - An address-of expression.
+// @arg isLHSUnchecked - If the LHS of the assignment is an unchecked pointer.
 //
-static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
+static bool addrOfExprRetMMSafePtr(Expr *UOExpr, bool isLHSUnchecked=false) {
   assert(UOExpr->isAddressOf() && "Not an Address-Of Expression ");
 
   Expr *E = cast<UnaryOperator>(UOExpr)->getSubExpr();
   unsigned level = 0;   // Iteration level.
   while (true) {
     // Strip off casts and parentheses.
-    while (isa<CastExpr>(E) || isa<ParenExpr>(E)) {
-      E = isa<CastExpr>(E) ? cast<CastExpr>(E)->getSubExpr() :
-        cast<ParenExpr>(E)->getSubExpr();
-    }
+    E = E->IgnoreParenCasts();
 
     QualType EType = E->getType();
     if (level != 0 && EType->isPointerType()) {
@@ -7979,16 +7982,55 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr) {
         E = cast<UnaryOperator>(E)->getSubExpr();
         break;
       case Expr::DeclRefExprClass:
-        // Reached the top (leftmost) of the Expr.
-        // Getting the address of a _checkable stack/global object should
-        // return an mmsafe pointer.
-        return EType.isCheckableQualified() ? true : false;
+        // Reached the top (leftmost) of the Expr. The UOPexr should be directly
+        // getting the address of a variable. If the LHS of the assignment is an
+        // unchecked pointer, then the RHS should not return an mmsafe pointer.
+        return !isLHSUnchecked;
       default:
         assert(0 && "Unknown Expr");
         break;
     }
     level++;
   }
+}
+
+//
+// Checked C
+// This is a helper function that checks if an Expr is a pointer arithmetic
+// expression on a local or global constant array.
+//
+// FIXME? Although the current implementation works for the programs we have
+// seen, it looks suspicious.
+//
+static bool isPointerArithOnArray(Expr *E) {
+  E = E->IgnoreParenCasts();
+  const Type *T = E->getType().getTypePtr();
+
+  if (isa<DeclRefExpr>(E)) {
+    // Should be the case of just a local array, which is equal to the
+    // name of the array plus offset 0.
+    return T->getTypeClass() == Type::ConstantArray;
+  } else if (isa<BinaryOperator>(E)) {
+    while (true) {
+      // An binary expression can be arbitrarily long, e.g., a + b + c + ....
+      Expr *LHS = cast<BinaryOperator>(E)->getLHS()->IgnoreParenCasts();
+      Expr *RHS = cast<BinaryOperator>(E)->getRHS()->IgnoreParenCasts();
+      if(LHS->getType()->getTypeClass() == Type::ConstantArray ||
+         RHS->getType()->getTypeClass() == Type::ConstantArray) {
+        return true;
+      }
+
+      if (isa<BinaryOperator>(LHS)) {
+        E = LHS;
+      } else if (isa<BinaryOperator>(RHS)) {
+        E = RHS;
+      } else {
+        return false;
+      }
+    }
+  }
+
+  return false;
 }
 
 // checkPointerTypesForAssignment - This is a very tricky routine (despite
@@ -8086,8 +8128,10 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
   // Checked C
   // Check if this is assigning an unchecked pointer to an MMSafe pointer.
   // We disallow assigning a raw C pointer to an MMSafe pointer unless
-  // this pointer is constructed by getting the address of a memory object
-  // pointed by an MMSafe pointer.
+  // the raw pointer is
+  //    1. constructed from getting the address of a memory object pointed
+  //    by an MMSafe pointer.
+  //    2. an address of an address-taken stack or global object.
   //
   // Another implementation choice is to do the check earlier in
   // Sema::CheckSingleAssignmentConstraints(). In that case we do not need
@@ -8096,10 +8140,8 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
   if (rhkind == CheckedPointerKind::Unchecked &&
       (lhkind == CheckedPointerKind::MMPtr ||
        lhkind == CheckedPointerKind::MMArray)) {
-
-    // Check if the RHS is a ternary expression (c? a : b) and if any
-    // any of its results returns an mmsafe pointer.
     Expr *RHSExpr = RHS.get();
+
     if (RHSExpr->isAddressOf()) {
       // Check if the RHS is an addr-of expression and if it returns
       // an mmsafe pointer.
@@ -8122,6 +8164,12 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
         } else {
           return Sema::Incompatible;
         }
+    } else {
+      if (isPointerArithOnArray(RHSExpr) &&
+          lhkind == CheckedPointerKind::MMArray) {
+        // Check if this is an expression of an arithmetic expr on an array.
+        return Sema::Compatible;
+      }
     }
 
 #if 0
@@ -8400,9 +8448,6 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
   // 1. Disallow assigning mmsafe pointers generated from an '&' expression
   // to a raw pointer.
   //
-  // FIXME? Should we allow or disallow 2.?
-  // 2. Disallow assigning the address of an _checkable object to a raw C pointer.
-  //
   // FIXME: Currently the RHSType of the result of an addres-of expression
   // is always a raw pointer. For example, The type of "&p->i" is "int *" if
   // i is an integer, regardless of the pointer type of p. This would give
@@ -8420,13 +8465,8 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
 
     if (lhkind == CheckedPointerKind::Unchecked &&
         rhkind == CheckedPointerKind::Unchecked) {
-      if (RHSType->getPointeeType().isCheckableQualified()) {
-        // Again, should we allow or disallow this?
-        return Sema::Incompatible;
-      }
-
       Expr *RHSExpr = RHS.get();
-      if (RHSExpr->isAddressOf() && addrOfExprRetMMSafePtr(RHSExpr)) {
+      if (RHSExpr->isAddressOf() && addrOfExprRetMMSafePtr(RHSExpr, true)) {
         // Check if the RHS is an addr-of expression that returns
         // an mmsafe pointer.
           return Sema::Incompatible;
@@ -8435,8 +8475,8 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
         // If the RHS is a ternary expression (c ? a : b), then neither of
         // the results is allowed to return an mmsafe ptr.
         Expr *TrueExpr = CO->getTrueExpr(), *FalseExpr = CO->getFalseExpr();
-        if ((TrueExpr->isAddressOf() && addrOfExprRetMMSafePtr(TrueExpr)) ||
-            (FalseExpr->isAddressOf() && addrOfExprRetMMSafePtr(FalseExpr))) {
+        if ((TrueExpr->isAddressOf() && addrOfExprRetMMSafePtr(TrueExpr, true)) ||
+            (FalseExpr->isAddressOf() && addrOfExprRetMMSafePtr(FalseExpr, true))) {
             return Sema::Incompatible;
         }
       }

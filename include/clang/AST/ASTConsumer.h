@@ -139,6 +139,10 @@ public:
   /// body may be parsed anyway if it is needed (for instance, if it contains
   /// the code completion point or is constexpr).
   virtual bool shouldSkipFunctionBody(Decl *D) { return true; }
+
+  /// Handle Checked C related stuffs, such as adding locks for address taken
+  /// variables. It is actually implemented in BackendConsumer.
+  virtual void HandleCheckedCForTemporalMemSafety() {}
 };
 
 } // end namespace clang.

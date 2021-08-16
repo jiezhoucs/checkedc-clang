@@ -2685,7 +2685,7 @@ public:
   llvm::DebugLoc SourceLocToDebugLoc(SourceLocation Location);
 
   /// Checked C: Emit an MMArrayPtr that points to a string constant.
-  llvm::Value *EmitMMArrayPtrForStrConst(llvm::Value *Str);
+  llvm::Value *EmitMMArrayPtrForStrConst(llvm::GEPOperator *Str);
 
   //===--------------------------------------------------------------------===//
   //                            Declaration Emission
