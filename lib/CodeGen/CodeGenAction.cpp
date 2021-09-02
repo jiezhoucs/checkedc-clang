@@ -251,11 +251,11 @@ namespace clang {
             LLVMIRGeneration.startTimer();
         }
 
+        Gen->HandleTranslationUnit(C);
+
         // Process Checked C related stuffs. This should be the earliest point
         // after the initial complete IR code generation before optimizations.
         HandleCheckedCForTemporalMemSafety();
-
-        Gen->HandleTranslationUnit(C);
 
         if (FrontendTimesIsEnabled) {
           LLVMIRGenerationRefCount -= 1;
