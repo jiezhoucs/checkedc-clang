@@ -425,6 +425,21 @@ public:
     return Builder.CreateIsNotNull(V, "tobool");
   }
 
+  // Checked C: A helper function that computes the offset of a struct field.
+  Value * GetStructElemOffset(llvm::StructType *ST, Value *Index) {
+    const llvm::StructLayout *SL = CGF.CGM.getDataLayout().getStructLayout(ST);
+    uint64_t IdxOfStruct = cast<ConstantInt>(Index)->getZExtValue();
+    return Builder.getInt64(SL->getElementOffset(IdxOfStruct));
+  }
+
+  // Checked C: A helper function that computes the offset of an item in an array.
+  Value *GetArrayElemOffset(llvm::ArrayType *AT, Value *Index) {
+    const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
+    Index = Builder.CreateIntCast(Index, Builder.getInt64Ty(), false);
+    Value *ElemSize = Builder.getInt64(DL.getTypeAllocSize(AT->getElementType()));
+    return Builder.CreateMul(Index, ElemSize);
+  }
+
   // Checked C: Emit an mmsafe ptr to a _checkable stack/global object.
   Value *EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf=false);
 
@@ -432,6 +447,8 @@ public:
   Value *EmitMMSafePtrToLocalAddrTakenVar(Value *Val);
   // Checked C: Emit an mmsafe ptr to an address-taken global variable.
   Value *EmitMMSafePtrToGlobalAddrTakenVar(Value *Val);
+  // CheckedC: Emit an mmarray ptr to an array in a struct pointed by an mmsafeptr.
+  Value *EmitMMSafePtrToArrayInStruct(Value *Val);
 
   //===--------------------------------------------------------------------===//
   //                            Visitor Methods
@@ -1801,23 +1818,6 @@ Value *ScalarExprEmitter::EmitNullValue(QualType Ty) {
   return CGF.EmitFromMemory(CGF.CGM.EmitNullConstant(Ty), Ty);
 }
 
-/// Checked C: A helper function to compute the offset of a struct field.
-static inline Value * GetStructElemOffset(llvm::StructType *ST, Value *Index,
-                                          const llvm::DataLayout &DL) {
-  const llvm::StructLayout *SL = DL.getStructLayout(ST);
-  uint64_t IdxOfStruct = cast<ConstantInt>(Index)->getZExtValue();
-  return ConstantInt::get(llvm::Type::getInt64Ty(ST->getContext()),
-                          (SL->getElementOffset(IdxOfStruct)));
-}
-
-/// Checked C: A helper function to compute the offset of an item of an array.
-static inline Value * GetArrayElemOffset(llvm::ArrayType *AT, Value *Index,
-                                         const llvm::DataLayout &DL) {
-  uint64_t offset = cast<ConstantInt>(Index)->getZExtValue() *
-                    DL.getTypeAllocSize(AT->getElementType());
-  return ConstantInt::get(llvm::Type::getInt64Ty(AT->getContext()), offset);
-}
-
 //
 // Checked C
 // Emit an MMSafe pointer to an _checkable local or global object.
@@ -1842,7 +1842,6 @@ Value *ScalarExprEmitter::EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf)
   using ArrayType = llvm::ArrayType;
   using PointerType = llvm::PointerType;
   using GEPOperator = llvm::GEPOperator;
-  const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
   unsigned AS = Val->getType()->getPointerAddressSpace();
   llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
 
@@ -1913,11 +1912,11 @@ Value *ScalarExprEmitter::EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf)
         Value *Index = GEPO->getOperand(i);
         if (StructType *ST = dyn_cast<StructType>(GEPPtrElemType)) {
           // Compute the offset in a struct.
-          Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index, DL));
+          Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index));
           GEPPtrElemType = ST->getTypeAtIndex(Index);
         } else if (ArrayType *AT = dyn_cast<ArrayType>(GEPPtrElemType)) {
           // Compute the offset in an array
-          Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index, DL));
+          Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index));
           GEPPtrElemType = AT->getElementType();
         } else {
           assert(0 && "Unknown GEP Element Type");
@@ -1933,10 +1932,10 @@ Value *ScalarExprEmitter::EmitMMSafePtrToCheckableObj(Value *Val, bool isAddrOf)
           // If the first index is not 0, add sizeof(struct) * firstIdx to Offset.
           assert(cast<ConstantInt>(GEPO->getOperand(1))->isZero() &&
                  "The first index is not 0");
-          Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index, DL));
+          Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index));
         } else if (ArrayType *AT = dyn_cast<ArrayType>(GEPPtrElemType)) {
           // Compute the offset in the array
-          Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index, DL));
+          Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index));
         } else {
           assert(0 && "Unknown GEP Element Type");
         }
@@ -1977,7 +1976,6 @@ ScalarExprEmitter::EmitMMSafePtrToLocalAddrTakenVar(Value *Val) {
   using PointerType = llvm::PointerType;
   using GEPOperator = llvm::GEPOperator;
   using ArrayType = llvm::ArrayType;
-  const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
   unsigned AS = Val->getType()->getPointerAddressSpace();
   llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
 
@@ -1992,7 +1990,7 @@ ScalarExprEmitter::EmitMMSafePtrToLocalAddrTakenVar(Value *Val) {
 
   // Handle an address-taken or pointer-arithmetic expression.
 
-  // Find out if Val is from a arith expr or an addr-of expr.
+  // Find out if Val is from an arith expr or an addr-of expr.
   // Until now all the arith GEP only have one index except for the one
   // whose pointer operand is an array variable, and all addr-of expr GEP
   // has 2 indices before any optimization.
@@ -2035,9 +2033,9 @@ ScalarExprEmitter::EmitMMSafePtrToLocalAddrTakenVar(Value *Val) {
           "The first index of the GEP is not 0");
       llvm::Type *GEPElemTy = GEP->getSourceElementType();
       if (StructType *ST = dyn_cast<StructType>(GEPElemTy)) {
-        Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index, DL));
+        Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index));
       } else if (ArrayType *AT = dyn_cast<ArrayType>(GEPElemTy)) {
-        Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index, DL));
+        Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index));
       } else {
         assert(0 && "Unknown GEP Element Type");
       }
@@ -2062,7 +2060,6 @@ ScalarExprEmitter::EmitMMSafePtrToLocalAddrTakenVar(Value *Val) {
 Value *ScalarExprEmitter::EmitMMSafePtrToGlobalAddrTakenVar(Value *Val) {
   using GlobalVariable = llvm::GlobalVariable;
   using GEPOperator = llvm::GEPOperator;
-  const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
   unsigned AS = Val->getType()->getPointerAddressSpace();
   llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
 
@@ -2088,11 +2085,11 @@ Value *ScalarExprEmitter::EmitMMSafePtrToGlobalAddrTakenVar(Value *Val) {
         Value *Index = GEP->getOperand(i);
         if (StructType *ST = dyn_cast<StructType>(GEPElemTy)) {
           KeyOffset = Builder.CreateAdd(KeyOffset,
-              GetStructElemOffset(ST, Index, DL));
+              GetStructElemOffset(ST, Index));
           GEPElemTy = ST->getTypeAtIndex(Index);
         } else if (llvm::ArrayType *AT = dyn_cast<llvm::ArrayType>(GEPElemTy)) {
           KeyOffset = Builder.CreateAdd(KeyOffset,
-              GetArrayElemOffset(AT, Index, DL));
+              GetArrayElemOffset(AT, Index));
           GEPElemTy = AT->getElementType();
         } else {
           assert(0 && "Unknown GEP Srouce Element Type");
@@ -2119,6 +2116,68 @@ Value *ScalarExprEmitter::EmitMMSafePtrToGlobalAddrTakenVar(Value *Val) {
 
   // Create an MMSafe pointer and return it.
   Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMSafePtrTy), Val, 0);
+  return Builder.CreateInsertValue(Val, KeyOffset, 1);
+}
+
+//
+// Checked C
+// Emit an MMArrayPtr to an array field of a struct pointed by an MMSafePtr.
+//
+// @param Val: a GEP that points to an element of an array in a struct.
+//
+// @return: An MMArrayPtr that points the array or an item of the array.
+//
+Value *ScalarExprEmitter::EmitMMSafePtrToArrayInStruct(Value *Val) {
+  using GetElementPtrInst = llvm::GetElementPtrInst;
+  GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Val);
+  assert(GEP && "Expecting an GEP");
+
+  unsigned AS = Val->getType()->getPointerAddressSpace();
+  llvm::LLVMContext &llvmContext = CGF.getLLVMContext();
+  Value *Offset = Builder.getInt64(0);
+  Value *GEPPtr = GEP->getPointerOperand();
+
+  if (GEP->getNumIndices() == 1) {
+    // The GEP should come from an arith-expr of array in struct.
+    // Compute the offset generated from the arith-expr.
+    while (GEP->getNumIndices() == 1) {
+      Offset = Builder.CreateAdd(Offset,
+          GetOffsetOfArithExpr(CGF, GEP, GEP->getOperand(1)));
+      GEP = dyn_cast<GetElementPtrInst>(GEP->getPointerOperand());
+    }
+  }
+  // Do the computation for the non-arith-expr part. E.g., for "p->arr + num;"
+  // the code beblow computes the offset for arr in a struct pointed by p.
+  do {
+    assert(GEP->getNumIndices() == 2 && "Not 2 indices in a GEP");
+    llvm::Type *ElemTy = GEP->getSourceElementType();
+    Value *Index = GEP->getOperand(2);
+    // If the first index is not 0, add sizeof(struct) * firstIdx to Offset.
+    assert(cast<ConstantInt>(GEP->getOperand(1))->isZero() &&
+        "The first index of the GEP is not 0");
+    if (llvm::StructType *ST = dyn_cast<llvm::StructType>(ElemTy)) {
+      Offset = Builder.CreateAdd(Offset, GetStructElemOffset(ST, Index));
+    } else if (llvm::ArrayType *AT = dyn_cast<llvm::ArrayType>(ElemTy)) {
+      Offset = Builder.CreateAdd(Offset, GetArrayElemOffset(AT, Index));
+    } else {
+      assert(0 && "Unknown Type");
+    }
+    GEPPtr = GEP->getPointerOperand();
+    GEP = dyn_cast<GetElementPtrInst>(GEPPtr);
+  } while (isa<GetElementPtrInst>(GEPPtr));
+
+  llvm::LoadInst *MMSafePtr = dyn_cast<llvm::LoadInst>(GEPPtr);
+  assert((MMSafePtr && cast<llvm::PointerType>(MMSafePtr->getPointerOperandType())
+        ->getElementType()->isMMSafePointerTy()) && "Not an MMSafePtr");
+  Value *MMSafePtrPtr = MMSafePtr->getPointerOperand();
+  Value *KeyOffset =        // Get the key-offset from the mmsafe pointer.
+    Builder.CGBuilderBaseTy::CreateLoad(Builder.CreateStructGEP(MMSafePtrPtr, 1));
+  KeyOffset = Builder.CreateAdd(KeyOffset, Offset);
+
+  // Create an mmarray pointer.
+  llvm::StructType *MMArrayPtrTy = llvm::PointerType::getMMArrayPtr(
+      cast<GetElementPtrInst>(Val)->getResultElementType(), llvmContext, AS);
+  Val = Builder.CreateInsertValue(llvm::UndefValue::get(MMArrayPtrTy), Val, 0);
   return Builder.CreateInsertValue(Val, KeyOffset, 1);
 }
 
@@ -2640,16 +2699,24 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
         using GEPOperator = llvm::GEPOperator;
         bool isLocalVar;
         if (isa<GetElementPtrInst>(Src)) {
-          // The RHS should be one of the follow two cases:
-          //   1. an arith-expr of an address-taken variable
+          // The RHS should be one of the follow three cases:
+          //   1. an arith-expr of an address-taken local or global variable
           //   2. an addr-of expr on a fild of a struct variable
-          //
-          // Determine if this is from a local or global variable.
+          //   3. an arith-expr of an array in a struct pointed by a checked ptr.
+
           Value *GEPPtr = cast<GetElementPtrInst>(Src);
           while (isa<GEPOperator>(GEPPtr)) {
             GEPPtr = cast<GEPOperator>(GEPPtr)->getPointerOperand();
           }
-          isLocalVar = !isa<llvm::GlobalVariable>(GEPPtr);
+          if (isa<llvm::GlobalVariable>(GEPPtr)) {
+            isLocalVar = false;
+          } else if (isa<llvm::AllocaInst>(GEPPtr)) {
+            isLocalVar = true;
+          } else {
+            // RHS should be an arith-expr of an array field of a struct.
+            Src = EmitMMSafePtrToArrayInStruct(Src);
+            return Builder.CreateMMSafePtrCast(Src, DstTy);
+          }
         } else if (isa<llvm::AllocaInst>(Src)) {
           // The RHS should be using the addr-of operator to directly get the
           // address of a local variable.

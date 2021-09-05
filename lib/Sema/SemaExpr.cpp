@@ -8002,7 +8002,7 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr, bool isLHSUnchecked=false) {
 // FIXME? Although the current implementation works for the programs we have
 // seen, it looks suspicious.
 //
-static bool isPointerArithOnArray(Expr *E) {
+static bool isArithOnLocalOrGlobalArray(Expr *E) {
   E = E->IgnoreParenCasts();
   const Type *T = E->getType().getTypePtr();
 
@@ -8031,6 +8031,64 @@ static bool isPointerArithOnArray(Expr *E) {
   }
 
   return false;
+}
+
+//
+// Checked C
+// A helper function for isArithArrayInStructPointedByMMSafePtr(). It checks
+// if an Expr represents an array in a struct pointed by a checked pointer.
+//
+static bool isArrayInStructPointedByMMSafePtr(Expr *E) {
+  if (!isa<MemberExpr>(E)) return false;
+
+  while (true) {
+    E = E->IgnoreParenImpCasts();
+    QualType EType = E->getType();
+    if (EType->isCheckedPointerMMSafeType()) return true;
+
+    switch(E->getStmtClass()) {
+      case Expr::MemberExprClass:
+        if (!EType->isArrayType()) return false;
+        E = cast<MemberExpr>(E)->getBase();
+        break;
+      case Expr::ArraySubscriptExprClass:
+        E = cast<ArraySubscriptExpr>(E)->getBase();
+        break;
+      case Expr::DeclRefExprClass:
+        return false;
+      default:
+        assert(0 && "Unknown Expr");
+    }
+  }
+}
+
+//
+// Checked C
+// This function checks if an Expr is an arithmetic expression of an array
+// in a struct pointed by a checked pointer. For example, "p->arr + num;"
+// where p is a checked pointer and arr is an array of int. It also counts
+// directly getting an array of a struct, which is an implicit arith-expr
+// with the numberic part being 0.
+//
+static bool isArithArrayInStructPointedByMMSafePtr(Expr *E) {
+  BinaryOperator *BO = dyn_cast<BinaryOperator>(E);
+  if (!BO) return isArrayInStructPointedByMMSafePtr(E);
+
+  while (true) {
+    Expr *LHS = BO->getLHS()->IgnoreParenImpCasts();
+    Expr *RHS = BO->getRHS()->IgnoreParenImpCasts();
+    if (isArrayInStructPointedByMMSafePtr(LHS) ||
+        isArrayInStructPointedByMMSafePtr(RHS))
+      return true;
+
+    if (isa<BinaryOperator>(LHS)) {
+      BO = cast<BinaryOperator>(LHS);
+    } else if (isa<BinaryOperator>(RHS)) {
+      BO = cast<BinaryOperator>(RHS);
+    } else {
+      return false;
+    }
+  }
 }
 
 // checkPointerTypesForAssignment - This is a very tricky routine (despite
@@ -8140,7 +8198,7 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
   if (rhkind == CheckedPointerKind::Unchecked &&
       (lhkind == CheckedPointerKind::MMPtr ||
        lhkind == CheckedPointerKind::MMArray)) {
-    Expr *RHSExpr = RHS.get();
+    Expr *RHSExpr = RHS.get()->IgnoreParenImpCasts();
 
     if (RHSExpr->isAddressOf()) {
       // Check if the RHS is an addr-of expression and if it returns
@@ -8164,12 +8222,13 @@ checkPointerTypesForAssignment(Sema &S, QualType LHSType, ExprResult &RHS) {
         } else {
           return Sema::Incompatible;
         }
-    } else {
-      if (isPointerArithOnArray(RHSExpr) &&
-          lhkind == CheckedPointerKind::MMArray) {
-        // Check if this is an expression of an arithmetic expr on an array.
+    } else if (lhkind == CheckedPointerKind::MMArray) {
+      // Check if this RHS is an arith-expr on
+      //   1. a local or global array, or
+      //   2. an array in a struct pointed by an mmarray ptr.
+      if (isArithOnLocalOrGlobalArray(RHSExpr) ||
+          isArithArrayInStructPointedByMMSafePtr(RHSExpr))
         return Sema::Compatible;
-      }
     }
 
 #if 0
@@ -8465,7 +8524,7 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
 
     if (lhkind == CheckedPointerKind::Unchecked &&
         rhkind == CheckedPointerKind::Unchecked) {
-      Expr *RHSExpr = RHS.get();
+      Expr *RHSExpr = RHS.get()->IgnoreParenImpCasts();
       if (RHSExpr->isAddressOf() && addrOfExprRetMMSafePtr(RHSExpr, true)) {
         // Check if the RHS is an addr-of expression that returns
         // an mmsafe pointer.
@@ -8479,6 +8538,10 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
             (FalseExpr->isAddressOf() && addrOfExprRetMMSafePtr(FalseExpr, true))) {
             return Sema::Incompatible;
         }
+      } else if (isArithArrayInStructPointedByMMSafePtr(RHSExpr)) {
+        // Check if this is an arith-expr (including an one that implicitly
+        // adds 0) on an array in a struct pointed by a checked pointer.
+        return Sema::Incompatible;
       }
     }
   }
