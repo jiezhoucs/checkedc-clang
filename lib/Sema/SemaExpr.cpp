@@ -7986,6 +7986,9 @@ static bool addrOfExprRetMMSafePtr(Expr *UOExpr, bool isLHSUnchecked=false) {
         // getting the address of a variable. If the LHS of the assignment is an
         // unchecked pointer, then the RHS should not return an mmsafe pointer.
         return !isLHSUnchecked;
+      case Expr::StringLiteralClass:
+        // Expr like &"hello"[i]
+        return !isLHSUnchecked;
       default:
         assert(0 && "Unknown Expr");
         break;
