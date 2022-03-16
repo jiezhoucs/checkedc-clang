@@ -8478,6 +8478,25 @@ static bool isVector(QualType QT, QualType ElementType) {
   return false;
 }
 
+/// A helper function that checks if an Expr is non-null raw pointer.
+static bool isNoneNullRawPtrTy(Expr *E, ASTContext &Context) {
+  QualType Ty = Context.getCanonicalType(E->getType()).getUnqualifiedType();
+  if (Ty->isNullPtrType()) return false;
+
+  if (CastExpr *CE = dyn_cast<CastExpr>(E)) {
+    Expr *CastedExpr = CE->getSubExpr()->IgnoreParenImpCasts();
+    if (IntegerLiteral *IL = dyn_cast<IntegerLiteral>(CastedExpr)) {
+      // An explicit cast to 0.
+      if (IL->getValue() == 0) return false;
+    }
+  }
+
+  if (cast<PointerType>(Ty)->getKind() == CheckedPointerKind::Unchecked) {
+    return true;
+  }
+  return false;
+}
+
 /// CheckAssignmentConstraints (C99 6.5.16) - This routine currently
 /// has code to accommodate several GCC extensions when type checking
 /// pointers. Here are some objectionable examples that GCC considers warnings:
@@ -8560,10 +8579,8 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
       if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(RHSExpr)) {
         Expr *TrueExpr = CO->getTrueExpr()->IgnoreParenImpCasts();
         Expr *FalseExpr = CO->getFalseExpr()->IgnoreParenImpCasts();
-        QualType TrueTy = Context.getCanonicalType(TrueExpr->getType()).getUnqualifiedType(),
-        FalseTy = Context.getCanonicalType(FalseExpr->getType()).getUnqualifiedType();
-        if (cast<PointerType>(TrueTy)->getKind() == CheckedPointerKind::Unchecked ||
-            cast<PointerType>(FalseTy)->getKind() == CheckedPointerKind::Unchecked){
+        if (isNoneNullRawPtrTy(TrueExpr, Context) ||
+            isNoneNullRawPtrTy(FalseExpr, Context)) {
           return Sema::Incompatible;
         }
       }
