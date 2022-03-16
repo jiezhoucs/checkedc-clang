@@ -8551,9 +8551,11 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
         // adds 0) on an array in a struct pointed by a checked pointer.
         return Sema::Incompatible;
       }
-    } else if (lhkind == CheckedPointerKind::MMPtr &&
-               rhkind == CheckedPointerKind::MMPtr) {
-      // Handle when the RHS is a ternary expr with one mm_ptr and one raw ptr.
+    } else if ((lhkind == CheckedPointerKind::MMPtr &&
+               rhkind == CheckedPointerKind::MMPtr) ||
+                (lhkind == CheckedPointerKind::MMArray &&
+                 rhkind == CheckedPointerKind::MMArray)) {
+      // Check if the RHS is a ternary expr with one mmsafe ptr and one raw ptr.
       Expr *RHSExpr = RHS.get()->IgnoreParenImpCasts();
       if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(RHSExpr)) {
         Expr *TrueExpr = CO->getTrueExpr()->IgnoreParenImpCasts();
@@ -8566,7 +8568,8 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
         }
       }
     } else {
-      // TODO? More cases to handle? What about MMArrayPtr related?
+      // TODO? More cases to handle? What about a ternary expr that involves
+      // both MMPtr and MMArrayPtr?
     }
   }
 
