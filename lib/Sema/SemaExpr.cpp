@@ -8506,9 +8506,10 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
   LHSType = Context.getCanonicalType(LHSType).getUnqualifiedType();
   RHSType = Context.getCanonicalType(RHSType).getUnqualifiedType();
 
-  // Checked C
-  // 1. Disallow assigning mmsafe pointers generated from an '&' expression
-  // to a raw pointer.
+  // Checked C: Check for two diasslowed cases.
+  // 1. Assigning mmsafe ptr generated from an '&' expr to a raw pointer.
+  // 2. Assigning a ternary expr that returns either an mmsafe ptr or a raw ptr
+  // to a raw ptr.
   //
   // FIXME: Currently the RHSType of the result of an addres-of expression
   // is always a raw pointer. For example, The type of "&p->i" is "int *" if
@@ -8520,6 +8521,10 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
   // earlier stage.
   // Plus, we would get a similarly confusing error message from assigning the
   // address of an _checkable object to a raw C pointer.
+  //
+  // FIXME: When either the true of false side of a ternary expr is an
+  // mmsafe ptr and the other is a raw pointer, the return type of the
+  // expr is mmsafe ptr. We should fix this in earlier code.
   if (isa<PointerType>(LHSType.getTypePtr()) &&
       isa<PointerType>(RHSType.getTypePtr())) {
     CheckedPointerKind lhkind = cast<PointerType>(LHSType)->getKind();
@@ -8546,6 +8551,22 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
         // adds 0) on an array in a struct pointed by a checked pointer.
         return Sema::Incompatible;
       }
+    } else if (lhkind == CheckedPointerKind::MMPtr &&
+               rhkind == CheckedPointerKind::MMPtr) {
+      // Handle when the RHS is a ternary expr with one mm_ptr and one raw ptr.
+      Expr *RHSExpr = RHS.get()->IgnoreParenImpCasts();
+      if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(RHSExpr)) {
+        Expr *TrueExpr = CO->getTrueExpr()->IgnoreParenImpCasts();
+        Expr *FalseExpr = CO->getFalseExpr()->IgnoreParenImpCasts();
+        QualType TrueTy = Context.getCanonicalType(TrueExpr->getType()).getUnqualifiedType(),
+        FalseTy = Context.getCanonicalType(FalseExpr->getType()).getUnqualifiedType();
+        if (cast<PointerType>(TrueTy)->getKind() == CheckedPointerKind::Unchecked ||
+            cast<PointerType>(FalseTy)->getKind() == CheckedPointerKind::Unchecked){
+          return Sema::Incompatible;
+        }
+      }
+    } else {
+      // TODO? More cases to handle? What about MMArrayPtr related?
     }
   }
 
