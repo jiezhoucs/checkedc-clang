@@ -4143,14 +4143,26 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
           if (STy->isMMSafePointerRep() &&
               LI->getType() != IRFuncTy->getParamType(FirstIRArg + i)) {
             // Checked C
-            // LLVM flatterns the struct representation of an MMSafe pointer.
-            // When calling a function with generic MMSafe pointer parameters,
-            // there could be a type mismatch between the pointer of
-            // the generic type (implemented as "i8*") and the concrete pointer
-            // type. Here we bitcast the concrete type to be the generic type.
-            IRCallArgs[FirstIRArg + i] =
-              Builder.CreateBitCast(LI, IRFuncTy->getParamType(FirstIRArg + i),
-                                    LI->getName() + "_generic");
+            if (CallInfo.isVariadic()) {
+              // When passing an mmsafe ptr to a variadic function call, for
+              // some reason the generated type for the parameter is undefined,
+              // while normally it would be "i8*" when passing a raw pointer.
+              // Here we simply ignore the undefined type and set the argument
+              // to be the passed value which is a raw ptr from an flatterned
+              // mmsafe ptr.
+              //
+              // FIXME: We should solve the "undefined type" problem earlier.
+              IRCallArgs[FirstIRArg + 1] = LI;
+            } else {
+              // LLVM flatterns the struct representation of an MMSafe pointer.
+              // When calling a function with generic MMSafe pointer parameters,
+              // there could be a type mismatch between the pointer of
+              // the generic type (implemented as "i8*") and the concrete pointer
+              // type. Here we bitcast the concrete type to be the generic type.
+              IRCallArgs[FirstIRArg + i] =
+                Builder.CreateBitCast(LI, IRFuncTy->getParamType(FirstIRArg + i),
+                    LI->getName() + "_generic");
+            }
           }
         }
       } else {
