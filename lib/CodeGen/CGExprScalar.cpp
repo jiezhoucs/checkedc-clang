@@ -814,11 +814,9 @@ public:
           assert(MMSafePtrTy->isMMSafePointerTy()
                  && "Not loading an MMSafe pointer.");
           StringRef ptrName = MMSafePtr_Ptr->getName();
-
           Value *KeyOffsetSrcPtr = Builder.CreateStructGEP(MMSafePtr_Ptr, 1);
           Value *KeyOffsetSrc =
             Builder.CGBuilderBaseTy::CreateLoad(KeyOffsetSrcPtr, ptrName);
-
           // Getting the address of an item of an array.
           if (MMSafePtrTy->isMMArrayPointerTy()) {
             // Add the new offset introduced by index * sizeof(pointed_elem)
@@ -832,9 +830,8 @@ public:
             Builder.CreateAdd(KeyOffsetSrc, Offset, ptrName + "_KeyOffset");
 
           // Use UndefValue to create a new MMSafe pointer.
-          StructType *MMPtrType =
-            StructType::get(result->getType(), KeyOffsetSrc->getType());
-          MMPtrType->isMMPtr = true;
+          StructType *MMPtrType = llvm::StructType::getMMPtr(Builder.getContext(),
+              {result->getType(), CGF.Int64Ty});
           llvm::UndefValue *newRet = llvm::UndefValue::get(MMPtrType);
           Value *insertPtr = Builder.CreateInsertValue(newRet, result, 0);
           return Builder.CreateInsertValue(insertPtr, KeyOffsetDest, 1);

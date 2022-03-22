@@ -1727,8 +1727,8 @@ EmitMMArrayPtrForStrConst(llvm::GEPOperator *StrGEP) {
   llvm::Type *Int64Ty = Builder.getInt64Ty();
 
   // Create an MMArrayPtr constant.
-  llvm::StructType *ST = llvm::StructType::get(StrGEP->getType(), Int64Ty);
-  ST->isMMArrayPtr = true;
+  llvm::StructType *ST = llvm::StructType::getMMArrayPtr(Builder.getContext(),
+      {StrGEP->getType(), Int64Ty});
   llvm::Value *KeyOffset = Builder.CreateShl(llvm::ConstantInt::get(Int64Ty, 1),
                                              32, "KeyOffset");
   cast<llvm::GlobalVariable>(StrGEP->getPointerOperand())->setPointedByMMSafePtr();
