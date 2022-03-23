@@ -767,6 +767,11 @@ public:
           // The case of getting the address of an item from an mmarrayptr.
           // e.g., "&p[i]" or "&p->p1[i]" where p and p1 are mmarrayptr.
           Index = GEP->getOperand(1);
+          // Add the new offset introduced by index * sizeof(pointed_elem)
+          ConstantInt *ArrayElemSize =
+            Builder.getInt64(DL.getTypeAllocSize(GEPPtrElemType));
+          Value *ArrayOffset = Builder.CreateMul(Index, ArrayElemSize);
+          Offset = Builder.CreateAdd(Offset, ArrayOffset);
         } else {
           Index = GEP->getOperand(2);
           // Working on an field of a struct.
@@ -818,15 +823,6 @@ public:
           Value *KeyOffsetSrcPtr = Builder.CreateStructGEP(MMSafePtr_Ptr, 1);
           Value *KeyOffsetSrc =
             Builder.CGBuilderBaseTy::CreateLoad(KeyOffsetSrcPtr, ptrName);
-
-          // Getting the address of an item of an array.
-          if (MMSafePtrTy->isMMArrayPointerTy()) {
-            // Add the new offset introduced by index * sizeof(pointed_elem)
-            ConstantInt *ArrayElemSize =
-              Builder.getInt64(DL.getTypeAllocSize(GEPPtrElemType));
-            Value *ArrayOffset = Builder.CreateMul(Index, ArrayElemSize);
-            Offset = Builder.CreateAdd(Offset, ArrayOffset);
-          }
 
           Value *KeyOffsetDest =
             Builder.CreateAdd(KeyOffsetSrc, Offset, ptrName + "_KeyOffset");
