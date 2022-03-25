@@ -3012,6 +3012,71 @@ bool CodeGenModule::isTypeConstant(QualType Ty, bool ExcludeCtor) {
   return true;
 }
 
+/// Checked C: Fix the type of a struct global variable when it has mmsafe
+/// pointer field(s) and is initialized with string constant. Without this fix,
+/// the type for the mmsafe pointer field(s) would be a raw pointer type.
+static llvm::Type *FixMMArrayPtrConstStrType(llvm::GlobalValue *Entry,
+    llvm::PointerType *Ty, const VarDecl *D, CodeGenModule &CGM) {
+  llvm::StructType *Elements = dyn_cast<llvm::StructType>(Ty->getElementType());
+  if (Elements) {
+    // Only consider struct type.
+    if (const RecordType *RT = dyn_cast<RecordType>(D->getType().
+          getCanonicalType())) {
+      // This if condition excludes assining a NULL to an mmsafe pointer.
+      RecordDecl *RD = RT->getDecl();
+      for (FieldDecl *FD : RD->fields()) {
+        if (FD->getType()->isCheckedPointerMMArrayType()) {
+          if (Entry) return Entry->getType()->getElementType();
+          return CGM.getTypes().ConvertTypeForMem(D->getType());
+        }
+      }
+    }
+  }
+
+  return Ty->getElementType();
+}
+
+/// Checked C: Fix initializer for global struct that has mmsafe pointer fields
+/// assigned to string constant.
+static llvm::Constant *FixMMArrayPtrConstStrInit(llvm::GlobalVariable *GV,
+    llvm::Constant *Init, CodeGenModule &CGM) {
+  using Constant = llvm::Constant;
+  using ConstantStruct = llvm::ConstantStruct;
+  using StructType = llvm::StructType;
+
+  if (GV->getValueType() == Init->getType()) return Init;
+  StructType *GVTy = dyn_cast<StructType>(GV->getValueType());
+  StructType *InitTy = dyn_cast<StructType>(Init->getType());
+  if (!GVTy || !InitTy) return  Init;
+
+  SmallVector<Constant*, 8> fields;
+  for (unsigned i = 0, j = 0;
+      i < GVTy->getNumElements() && j < InitTy->getNumElements(); i++, j++) {
+    if (GVTy->getElementType(i)->isMMSafePointerTy() &&
+        !InitTy->getElementType(j)->isMMSafePointerTy()) {
+      assert(InitTy->getElementType(j)->isPointerTy() && "Not a Pointer Type");
+      Constant *MMArrayPtr;
+      Constant *C = cast<Constant>(Init->getOperand(j));
+      if (C->isNullValue()) {
+        // Create a NULL to an MMSafePtr.
+        MMArrayPtr = CGM.EmitNullMMSafePtr(GVTy->getElementType(i));
+      } else {
+        // Create an MMArrayPtr to a string constant.
+        llvm::GEPOperator *ConstStr = cast<llvm::GEPOperator>(C);
+        MMArrayPtr = cast<Constant>(CodeGenFunction(CGM).
+            EmitMMArrayPtrForStrConst(ConstStr));
+      }
+      fields.push_back(MMArrayPtr);
+      // Skip UndefValue that is used for padding.
+      assert(isa<llvm::UndefValue>(Init->getOperand(++j)) && "Not an UndefValue");
+    } else {
+      fields.push_back(cast<Constant>(Init->getOperand(j)));
+    }
+  }
+
+  return ConstantStruct::get(GVTy, ArrayRef<Constant*>(fields));
+}
+
 /// GetOrCreateLLVMGlobal - If the specified mangled name is not in the module,
 /// create and return an llvm GlobalVariable with the specified type.  If there
 /// is something in the module with the specified name, return it potentially
@@ -3079,8 +3144,9 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
   auto AddrSpace = GetGlobalVarAddressSpace(D);
   auto TargetAddrSpace = getContext().getTargetAddressSpace(AddrSpace);
 
+  llvm::Type *TyElemTy = FixMMArrayPtrConstStrType(Entry, Ty, D, *this);
   auto *GV = new llvm::GlobalVariable(
-      getModule(), Ty->getElementType(), false,
+      getModule(), TyElemTy, false,
       llvm::GlobalValue::ExternalLinkage, nullptr, MangledName, nullptr,
       llvm::GlobalVariable::NotThreadLocal, TargetAddrSpace);
   // Checked C: set _checkable if it is.
@@ -3633,7 +3699,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
         Linkage = llvm::GlobalValue::InternalLinkage;
     }
   }
-
+  Init = FixMMArrayPtrConstStrInit(GV, Init, *this);
   GV->setInitializer(Init);
   if (emitter) emitter->finalize(GV);
 
