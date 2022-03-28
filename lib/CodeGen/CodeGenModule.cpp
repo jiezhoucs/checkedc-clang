@@ -3012,14 +3012,14 @@ bool CodeGenModule::isTypeConstant(QualType Ty, bool ExcludeCtor) {
   return true;
 }
 
-/// Checked C: Fix the type of a struct global variable when it has mmsafe
-/// pointer field(s) and is initialized with string constant. Without this fix,
-/// the type for the mmsafe pointer field(s) would be a raw pointer type.
+/// Checked C: Fix the type of a global struct or array of struct when it has
+/// mmsafe pointer field(s) and is initialized with string constant or NULL.
+/// Without this fix, the type for the mmsafe pointer field(s) would be raw
+/// pointer type.
 static llvm::Type *FixMMArrayPtrConstStrType(llvm::GlobalValue *Entry,
     llvm::PointerType *Ty, const VarDecl *D, CodeGenModule &CGM) {
-  llvm::StructType *Elements = dyn_cast<llvm::StructType>(Ty->getElementType());
-  if (Elements) {
-    // Only consider struct type.
+  if (isa<llvm::StructType>(Ty->getElementType())) {
+    // Handle global struct.
     if (const RecordType *RT = dyn_cast<RecordType>(D->getType().
           getCanonicalType())) {
       // This if condition excludes assining a NULL to an mmsafe pointer.
@@ -3031,35 +3031,105 @@ static llvm::Type *FixMMArrayPtrConstStrType(llvm::GlobalValue *Entry,
         }
       }
     }
+  } else if (isa<llvm::ArrayType>(Ty->getElementType())) {
+    if (const ArrayType *AT =
+        dyn_cast<ArrayType>(D->getType().getCanonicalType())) {
+      if (const RecordType *RT = dyn_cast<RecordType>(AT->getElementType())) {
+        // Handle global array of struct.
+        RecordDecl *RD = RT->getDecl();
+        for (FieldDecl *FD : RD->fields()) {
+          if (FD->getType()->isCheckedPointerMMArrayType()) {
+            if (Entry) return Entry->getType()->getElementType();
+            return CGM.getTypes().ConvertTypeForMem(D->getType());
+          }
+        }
+      }
+    }
   }
 
   return Ty->getElementType();
 }
 
-/// Checked C: Fix initializer for global struct that has mmsafe pointer fields
-/// assigned to string constant.
+/// Checked C: Fix initializer for a global struct or an array of struct that
+/// has mmsafe pointer fields assigned to string constant or NULL.
 static llvm::Constant *FixMMArrayPtrConstStrInit(llvm::GlobalVariable *GV,
     llvm::Constant *Init, CodeGenModule &CGM) {
   using Constant = llvm::Constant;
   using ConstantStruct = llvm::ConstantStruct;
+  using ArrayType = llvm::ArrayType;
   using StructType = llvm::StructType;
 
-  if (GV->getValueType() == Init->getType()) return Init;
-  StructType *GVTy = dyn_cast<StructType>(GV->getValueType());
-  StructType *InitTy = dyn_cast<StructType>(Init->getType());
-  if (!GVTy || !InitTy) return  Init;
+  llvm::Type *GVTy = GV->getValueType(), *InitTy = Init->getType();
+  if (GVTy == InitTy) return Init;
+  if (!GVTy->isStructTy() && !GVTy->isArrayTy()) return Init;
+
+  ArrayType *GVATy = dyn_cast<ArrayType>(GVTy);
+  if (GVATy) {
+    ArrayType *InitATy = cast<ArrayType>(InitTy);
+    if (StructType *GVETy = dyn_cast<StructType>(GVATy->getElementType())) {
+      StructType *InitETy = cast<StructType>(InitATy->getElementType());
+      // Location(s) of mismatched type in the array.
+      SmallVector<bool, 8> mismatchLoc;
+      bool fullyMatched = true;
+      for (unsigned i = 0, j = 0; i < GVETy->getNumElements(); i++, j++) {
+        // Collect locations of mismatched type.
+        if (GVETy->getElementType(i)->isMMSafePointerTy() &&
+            !InitETy->getElementType(j)->isMMSafePointerTy()) {
+          assert(InitETy->getElementType(j++)->isPointerTy() &&
+              "Not a Pointer Type");
+          fullyMatched = false;
+          mismatchLoc.push_back(true);
+        } else {
+          mismatchLoc.push_back(false);
+        }
+      }
+      if (fullyMatched) return Init;
+
+      // There are mismatch between MMArrayPtr and string constant/NULL.
+      SmallVector<Constant*, 16> Items;
+      for (unsigned i = 0; i < GVATy->getNumElements(); i++) {
+        SmallVector<Constant*, 8> fields;
+        Constant *item = cast<Constant>(Init->getOperand(i));
+        for (unsigned j = 0, k = 0; j < mismatchLoc.size(); j++, k++) {
+          if (mismatchLoc[j]) {
+            Constant *MMArrayPtr;
+            Constant *C = cast<Constant>(item->getOperand(k++));
+            if (C->isNullValue()) {
+              // Create a NULL to an MMSafePtr.
+              MMArrayPtr = CGM.EmitNullMMSafePtr(GVETy->getElementType(j));
+            } else {
+              // Create an MMArrayPtr to a string constant.
+              llvm::GEPOperator *ConstStr = cast<llvm::GEPOperator>(C);
+              MMArrayPtr = cast<Constant>(CodeGenFunction(CGM).
+                  EmitMMArrayPtrForStrConst(ConstStr));
+            }
+            fields.push_back(MMArrayPtr);
+          } else {
+            fields.push_back(cast<Constant>(item->getOperand(k)));
+          }
+        }
+        Items.push_back(ConstantStruct::get(GVETy, ArrayRef<Constant*>(fields)));
+      }
+      return llvm::ConstantArray::get(GVATy, ArrayRef<Constant*>(Items));
+    }
+  }
+
+  // Handle global struct.
+  StructType *GVSTy = dyn_cast<StructType>(GV->getValueType());
+  StructType *InitSTy = dyn_cast<StructType>(Init->getType());
+  if (!GVSTy || !InitSTy) return Init;
 
   SmallVector<Constant*, 8> fields;
   for (unsigned i = 0, j = 0;
-      i < GVTy->getNumElements() && j < InitTy->getNumElements(); i++, j++) {
-    if (GVTy->getElementType(i)->isMMSafePointerTy() &&
-        !InitTy->getElementType(j)->isMMSafePointerTy()) {
-      assert(InitTy->getElementType(j)->isPointerTy() && "Not a Pointer Type");
+      i < GVSTy->getNumElements() && j < InitSTy->getNumElements(); i++, j++) {
+    if (GVSTy->getElementType(i)->isMMSafePointerTy() &&
+        !InitSTy->getElementType(j)->isMMSafePointerTy()) {
+      assert(InitSTy->getElementType(j)->isPointerTy() && "Not a Pointer Type");
       Constant *MMArrayPtr;
       Constant *C = cast<Constant>(Init->getOperand(j));
       if (C->isNullValue()) {
         // Create a NULL to an MMSafePtr.
-        MMArrayPtr = CGM.EmitNullMMSafePtr(GVTy->getElementType(i));
+        MMArrayPtr = CGM.EmitNullMMSafePtr(GVSTy->getElementType(i));
       } else {
         // Create an MMArrayPtr to a string constant.
         llvm::GEPOperator *ConstStr = cast<llvm::GEPOperator>(C);
@@ -3074,7 +3144,7 @@ static llvm::Constant *FixMMArrayPtrConstStrInit(llvm::GlobalVariable *GV,
     }
   }
 
-  return ConstantStruct::get(GVTy, ArrayRef<Constant*>(fields));
+  return ConstantStruct::get(GVSTy, ArrayRef<Constant*>(fields));
 }
 
 /// GetOrCreateLLVMGlobal - If the specified mangled name is not in the module,
